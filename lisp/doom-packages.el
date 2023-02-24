@@ -97,7 +97,7 @@ uses a straight or package.el command directly).")
       ;; no affect on packages that are pinned, however (run 'doom purge' to
       ;; compact those after-the-fact). Some packages break when shallow cloned
       ;; (like magit and org), but we'll deal with that elsewhere.
-      straight-vc-git-default-clone-depth '(1 single-branch))
+      straight-vc-git-default-clone-depth '(full single-branch))
 
 (with-eval-after-load 'straight
   ;; HACK: Doom relies on deferred compilation, which spares the user 20-50min
