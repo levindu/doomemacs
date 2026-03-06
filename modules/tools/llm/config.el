@@ -27,7 +27,21 @@
 
 (use-package! gptel-magit
   :when (modulep! :tools magit)
-  :hook (magit-mode . gptel-magit-install))
+  :hook (magit-mode . gptel-magit-install)
+  :config
+  (defun gptel-magit--generate (callback)
+    "Generate a commit message for current magit repo.
+Invokes CALLBACK with the generated message when done."
+    (let ((diff (magit-git-output "diff" "--cached")))
+      (gptel-magit--request diff
+        :system (gptel-magit--get-commit-prompt)
+        :context nil
+        :callback (lambda (response _info)
+                    (when (stringp response) ;; repsonse may be a reason cons
+                      (let ((msg (gptel-magit--format-commit-message response)))
+                        (funcall callback msg)))))))
+
+  )
 
 
 (use-package! ob-gptel
