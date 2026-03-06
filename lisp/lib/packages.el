@@ -1054,6 +1054,26 @@ Must be run from a magit diff buffer."
         (print! (item "No packages need attention"))
         nil))))
 
+(defun doom-packages--fetch-stamp-file (local-repo)
+  "Return path of the fetch timestamp file for LOCAL-REPO."
+  (file-name-concat doom-local-dir "straight" "fetch-stamps" local-repo))
+
+(defun doom-packages--fetch-recent-p (local-repo &optional max-age)
+  "Return non-nil if LOCAL-REPO was fetched within MAX-AGE seconds (default 1800)."
+  (let ((stamp (doom-packages--fetch-stamp-file local-repo)))
+    (and (file-exists-p stamp)
+         (< (float-time
+             (time-subtract (current-time)
+                            (file-attribute-modification-time
+                             (file-attributes stamp))))
+            (or max-age 1800)))))
+
+(defun doom-packages--fetch-stamp-write (local-repo)
+  "Record a successful fetch for LOCAL-REPO."
+  (let ((stamp (doom-packages--fetch-stamp-file local-repo)))
+    (make-directory (file-name-directory stamp) t)
+    (with-temp-file stamp)))
+
 (defun doom-packages-update (&optional pinned-only-p)
   "Updates packages."
   (doom-initialize-packages)
@@ -1098,15 +1118,21 @@ Must be run from a magit diff buffer."
                    output)
                (or (cond
                     ((not (stringp target-ref))
-                     (print! (start "\r(%d/%d) Fetching %s...%s") i total package esc)
-                     (doom-packages--straight-with (straight-vc-fetch-from-remote recipe)
-                       (when .it
-                         (straight-merge-package package)
-                         (setq target-ref (straight-vc-get-commit type local-repo))
-                         (setq output (doom-packages--commit-log-between ref target-ref)
-                               commits (length (split-string output "\n" t)))
-                         (or (not (doom-packages--same-commit-p target-ref ref))
-                             (cl-return)))))
+                     (if (doom-packages--fetch-recent-p local-repo)
+                         (progn
+                           (print! (item "\r(%d/%d) %s fetch skipped (fetched recently)%s")
+                                   i total package esc)
+                           (cl-return))
+                       (print! (start "\r(%d/%d) Fetching %s...%s") i total package esc)
+                       (doom-packages--straight-with (straight-vc-fetch-from-remote recipe)
+                         (when .it
+                           (doom-packages--fetch-stamp-write local-repo)
+                           (straight-merge-package package)
+                           (setq target-ref (straight-vc-get-commit type local-repo))
+                           (setq output (doom-packages--commit-log-between ref target-ref)
+                                 commits (length (split-string output "\n" t)))
+                           (or (not (doom-packages--same-commit-p target-ref ref))
+                               (cl-return))))))
 
                     ((doom-packages--same-commit-p target-ref ref)
                      (print! (item "\r(%d/%d) %s is up-to-date...%s") i total package esc)
