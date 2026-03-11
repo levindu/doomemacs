@@ -259,6 +259,44 @@ However, in batch mode, print to stdout instead of stderr."
                                 "/dev/null")))
     (apply fn args)))
 
+;; HACK: straight only applies `single-branch` at clone time. Repos that were
+;;   cloned before this setting was introduced keep their wildcard fetch refspec
+;;   forever, pulling every branch of monorepos like nongnu_elpa (~280
+;;   branches, 500MB+). Fix all repos after `doom sync` completes.
+(defun doom--straight-fix-single-branch-refspecs-h ()
+  "Fix wildcard fetch refspecs to single-branch for all straight repos."
+  (when (and (boundp 'straight-vc-git-default-clone-depth)
+             (memq 'single-branch (ensure-list straight-vc-git-default-clone-depth)))
+    (dolist (repo (directory-files (straight--repos-dir) :full "^[^.]"))
+      (when (file-directory-p (doom-path repo ".git"))
+        (let ((default-directory repo)
+              branch remotes)
+          ;; Get current branch
+          (setq branch (string-trim
+                        (shell-command-to-string
+                         "git rev-parse --abbrev-ref HEAD 2>/dev/null")))
+          ;; Skip if no branch or detached HEAD
+          (when (and (not (string-empty-p branch))
+                     (not (equal branch "HEAD")))
+            ;; Get all remotes
+            (setq remotes (string-trim
+                           (shell-command-to-string
+                            "git remote 2>/dev/null")))
+            (dolist (remote (split-string remotes "\n" t))
+              (let ((current-fetch (string-trim
+                                    (shell-command-to-string
+                                     (format "git config remote.%s.fetch 2>/dev/null" remote)))))
+                ;; Fix if it's a wildcard
+                (when (and current-fetch
+                           (string-match-p "/\\*:" current-fetch))
+                  (shell-command
+                   (format "git config remote.%s.fetch '+refs/heads/%s:refs/remotes/%s/%s'"
+                           remote branch remote branch))
+                  (print! (item "Fixed wildcard refspec for %s (%s -> %s)")
+                          (file-name-nondirectory repo) remote branch))))))))))
+
+(add-hook 'doom-after-sync-hook #'doom--straight-fix-single-branch-refspecs-h)
+
 ;; If the repo failed to clone correctly (usually due to a connection failure),
 ;; straight proceeds as normal until a later call produces a garbage result
 ;; (typically, when it fails to fetch the remote branch of the empty directory).
