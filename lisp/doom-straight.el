@@ -389,5 +389,129 @@ However, in batch mode, print to stdout instead of stderr."
       (let ((default-directory repo-dir))
         (straight--process-run "git" "config" "core.autocrlf" "true")))))
 
+;; --- doom-straight-cache ---
+
+;; doom-straight-cache implements a git repository cache for straight.el
+;; packages. The cache stores package HEADs as branches in a bare git repository
+;; at `doom-straight-cache-repo'. This speeds up cloning by fetching objects
+;; from the local cache before falling back to remote fetches.
+;;
+;; The cache is:
+;; - Read from during first clone (if available) to speed up local object retrieval
+;; - Written to after clone/update to keep the cache current
+
+(defvar doom-straight-cache-repo (expand-file-name ".git/cache.git" doom-emacs-dir)
+  "Path to the bare git repository used as a package cache.
+
+This cache stores package HEADs as branches named after their local-repo.
+During clone, objects are fetched from this cache first to speed up
+the process, then the remote is fetched for any missing objects.")
+
+(defvar doom-straight-cache-enabled t
+  "If non-nil, use the git cache for cloning and updating packages.
+
+Set to nil to disable caching if you encounter issues.")
+
+;;;###autoload
+(defun doom-straight-cache--init ()
+  "Initialize the cache repository if it doesn't exist.
+Returns non-nil if the cache is ready to use."
+  (when doom-straight-cache-enabled
+    (let* ((cache-dir (expand-file-name doom-straight-cache-repo))
+           (default-directory (file-name-directory cache-dir)))
+      (unless (file-directory-p cache-dir)
+        (make-directory (file-name-directory cache-dir) t)
+        (straight--process-run "git" "init" "--bare" cache-dir))
+      (file-directory-p cache-dir))))
+
+(defun doom-straight-cache--write-to-cache (repo-dir local-repo)
+  "Push the current HEAD from REPO-DIR to the cache as branch LOCAL-REPO.
+This makes the package's objects available for future clones."
+  (when (and doom-straight-cache-enabled
+             (doom-straight-cache--init)
+             (file-directory-p repo-dir)
+             (file-directory-p (expand-file-name ".git" repo-dir)))
+    (let ((default-directory repo-dir)
+          (cache-ref (format "refs/heads/%s" local-repo)))
+      ;; Push current HEAD to the cache repo
+      (straight--process-run
+       "git" "push" "--force"
+       doom-straight-cache-repo
+       (format "HEAD:%s" cache-ref)))))
+
+(defun doom-straight-cache--post-clone-handler (&key repo-dir local-repo &rest _)
+  "Hook handler to write newly cloned repos to cache.
+REPO-DIR is the path to the cloned repository.
+LOCAL-REPO is the name used for the package in straight."
+  (when (and repo-dir local-repo)
+    (doom-straight-cache--write-to-cache repo-dir local-repo)))
+
+;;;###autoload
+(cl-defun doom-straight-cache--clone-internal-a
+    (fn &key depth remote url repo-dir branch commit)
+  "Advice around `straight-vc-git--clone-internal' to use cache.
+For full-depth clones, uses `git clone --reference' to reuse cached objects.
+
+FN is the original function.
+DEPTH, REMOTE, URL, REPO-DIR, BRANCH, and COMMIT are the standard
+arguments passed to `straight-vc-git--clone-internal'."
+  (let ((single-branch-p (when (listp depth)
+                           (prog1
+                               (eq (cadr depth) 'single-branch)
+                             (setq depth (pop depth)))))
+        (full-depth-p (eq depth 'full)))
+    ;; For full-depth clones with cache enabled, try using cache reference
+    (if (and doom-straight-cache-enabled full-depth-p (doom-straight-cache--init))
+        (let* ((local-repo (file-name-nondirectory (directory-file-name repo-dir)))
+               (cache-branch (format "refs/heads/%s" local-repo))
+               (use-cache-p (straight--process-run-p
+                             "git" "--git-dir" doom-straight-cache-repo
+                             "rev-parse" "--verify" cache-branch)))
+          (condition-case err
+              (let ((default-directory (straight--repos-dir)))
+                ;; Use --reference if cache has this package
+                (apply #'straight--process-output
+                       "git" "clone" "--origin" remote
+                       "--no-checkout"
+                       (when use-cache-p
+                         (list "--reference" doom-straight-cache-repo))
+                       (when single-branch-p "--single-branch")
+                       (when single-branch-p "--no-single-branch")
+                       (when branch `("--branch" ,branch))
+                       url repo-dir))
+            ;; If clone with --reference fails, fall back to original
+            (error
+             (when (file-exists-p repo-dir)
+               (delete-directory repo-dir 'recursive))
+             (funcall fn :depth (if single-branch-p '(full single-branch) 'full)
+                      :remote remote :url url :repo-dir repo-dir
+                      :branch branch :commit commit))))
+      ;; For non-full-depth or cache disabled, use original function
+      (funcall fn :depth (if single-branch-p
+                             (if (integerp depth) (list depth 'single-branch) depth)
+                           depth)
+               :remote remote :url url :repo-dir repo-dir
+               :branch branch :commit commit))))
+
+;;;###autoload
+(defun doom-straight-cache--fetch-advice-a (fn recipe &optional from-upstream)
+  "Advice around `straight-vc-git-fetch-from-remote' to update cache after fetch.
+After a successful fetch for RECIPE, push the new HEAD to the cache
+so future clones can benefit from it.
+
+FN is the original function.
+FROM-UPSTREAM is passed to the original function."
+  (prog1 (funcall fn recipe from-upstream)
+    (when doom-straight-cache-enabled
+      (straight--with-plist recipe (package local-repo)
+        (let* ((local-repo (or local-repo package))
+               (repo-dir (straight--repos-dir local-repo)))
+          (when (file-directory-p repo-dir)
+            (doom-straight-cache--write-to-cache repo-dir local-repo)))))))
+
+;; Register hooks and advice
+(add-hook 'straight-vc-git-post-clone-hook #'doom-straight-cache--post-clone-handler)
+(advice-add #'straight-vc-git--clone-internal :around #'doom-straight-cache--clone-internal-a)
+(advice-add #'straight-vc-git-fetch-from-remote :around #'doom-straight-cache--fetch-advice-a)
 (provide 'doom-straight)
 ;;; doom-packages.el ends here
